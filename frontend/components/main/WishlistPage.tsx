@@ -1,33 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Heart, ShoppingBag, Bookmark, Share, Trash2 } from 'lucide-react';
+import { wishlistAPI, WishlistItem } from '@/lib/wishlistAPI';
 
 export function WishlistPage() {
-  const [wishlistItems, setWishlistItems] = useState([
-    {
-      id: 1,
-      title: "Oversized Denim Jacket",
-      brand: "Urban Vibes",
-      price: "₹2,499",
-      image: "https://images.pexels.com/photos/1040945/pexels-photo-1040945.jpeg?auto=compress&cs=tinysrgb&w=400",
-      inStock: true,
-      deliveryTime: "45 mins"
-    },
-    {
-      id: 2,
-      title: "Vintage Band Tee",
-      brand: "Retro Culture",
-      price: "₹899",
-      image: "https://images.pexels.com/photos/1040945/pexels-photo-1040945.jpeg?auto=compress&cs=tinysrgb&w=400",
-      inStock: false,
-      deliveryTime: "N/A"
-    }
-  ]);
-
+  const [wishlistItems, setWishlistItems] = useState<WishlistItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [savedClosets] = useState([
     {
       id: 1,
@@ -45,8 +28,36 @@ export function WishlistPage() {
     }
   ]);
 
-  const removeFromWishlist = (id: number) => {
-    setWishlistItems(prev => prev.filter(item => item.id !== id));
+  // Fetch wishlist data on component mount
+  useEffect(() => {
+    fetchWishlist();
+  }, []);
+
+  const fetchWishlist = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const response = await wishlistAPI.getWishlist();
+      if (response.success) {
+        setWishlistItems(response.data.wishlist.items);
+      }
+    } catch (err: any) {
+      console.error('Failed to fetch wishlist:', err);
+      setError(err.message || 'Failed to load wishlist');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRemoveItem = async (productId: string) => {
+    try {
+      await wishlistAPI.removeFromWishlist(productId);
+      // Remove item from local state
+      setWishlistItems(prev => prev.filter(item => item.product._id !== productId));
+    } catch (err: any) {
+      console.error('Failed to remove item:', err);
+      setError(err.message || 'Failed to remove item');
+    }
   };
 
   return (
@@ -70,7 +81,21 @@ export function WishlistPage() {
           </TabsList>
 
           <TabsContent value="wishlist" className="mt-6">
-            {wishlistItems.length === 0 ? (
+            {loading ? (
+              <div className="text-center py-12">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+                <p className="text-gray-400">Loading your wishlist...</p>
+              </div>
+            ) : error ? (
+              <div className="text-center py-12">
+                <Heart className="w-16 h-16 text-red-600 mx-auto mb-4" />
+                <h3 className="text-xl font-semibold mb-2">Error loading wishlist</h3>
+                <p className="text-gray-400 mb-6">{error}</p>
+                <Button onClick={fetchWishlist} className="bg-primary hover:bg-primary/90">
+                  Try Again
+                </Button>
+              </div>
+            ) : wishlistItems.length === 0 ? (
               <div className="text-center py-12">
                 <Heart className="w-16 h-16 text-gray-600 mx-auto mb-4" />
                 <h3 className="text-xl font-semibold mb-2">Your wishlist is empty</h3>
@@ -81,55 +106,72 @@ export function WishlistPage() {
               </div>
             ) : (
               <div className="space-y-4">
-                {wishlistItems.map(item => (
-                  <Card key={item.id} className="overflow-hidden bg-card border-0">
-                    <div className="flex">
-                      <img
-                        src={item.image}
-                        alt={item.title}
-                        className="w-24 h-24 object-cover"
-                      />
-                      <div className="flex-1 p-4">
-                        <div className="flex items-start justify-between mb-2">
-                          <div>
-                            <h3 className="font-semibold text-white">{item.title}</h3>
-                            <p className="text-sm text-gray-400">{item.brand}</p>
-                          </div>
-                          <button
-                            onClick={() => removeFromWishlist(item.id)}
-                            className="text-gray-400 hover:text-red-400"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                        
-                        <div className="flex items-center justify-between">
-                          <span className="text-lg font-bold text-primary">{item.price}</span>
-                          <div className="flex space-x-2">
-                            <Button variant="outline" size="sm" className="border-border">
-                              <Share className="w-3 h-3 mr-1" />
-                              Share
-                            </Button>
-                            <Button 
-                              size="sm" 
-                              disabled={!item.inStock}
-                              className="bg-primary hover:bg-primary/90 text-black"
+                {wishlistItems.map(item => {
+                  const primaryImage = item.product.images.find(img => img.isPrimary) || item.product.images[0];
+                  return (
+                    <Card key={item._id} className="overflow-hidden bg-card border-0">
+                      <div className="flex">
+                        <img
+                          src={primaryImage?.url || '/placeholder-image.jpg'}
+                          alt={item.product.name}
+                          className="w-24 h-24 object-cover"
+                        />
+                        <div className="flex-1 p-4">
+                          <div className="flex items-start justify-between mb-2">
+                            <div>
+                              <h3 className="font-semibold text-white">{item.product.name}</h3>
+                              <p className="text-sm text-gray-400">{item.product.brand}</p>
+                            </div>
+                            <button
+                              onClick={() => handleRemoveItem(item.product._id)}
+                              className="text-gray-400 hover:text-red-400"
                             >
-                              <ShoppingBag className="w-3 h-3 mr-1" />
-                              {item.inStock ? 'Buy Now' : 'Out of Stock'}
-                            </Button>
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-2">
+                              <span className="text-lg font-bold text-primary">
+                                ₹{item.product.price.current}
+                              </span>
+                              {item.product.price.original > item.product.price.current && (
+                                <span className="text-sm text-gray-500 line-through">
+                                  ₹{item.product.price.original}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex space-x-2">
+                              <Button variant="outline" size="sm" className="border-border">
+                                <Share className="w-3 h-3 mr-1" />
+                                Share
+                              </Button>
+                              <Button 
+                                size="sm" 
+                                disabled={!item.product.inStock}
+                                className="bg-primary hover:bg-primary/90 text-black"
+                              >
+                                <ShoppingBag className="w-3 h-3 mr-1" />
+                                {item.product.inStock ? 'Buy Now' : 'Out of Stock'}
+                              </Button>
+                            </div>
+                          </div>
+                          
+                          <div className="flex items-center justify-between mt-2">
+                            <p className="text-xs text-gray-400">
+                              Added {new Date(item.addedAt).toLocaleDateString()}
+                            </p>
+                            {item.product.inStock && (
+                              <p className="text-xs text-green-400">
+                                ✅ In Stock
+                              </p>
+                            )}
                           </div>
                         </div>
-                        
-                        {item.inStock && (
-                          <p className="text-xs text-green-400 mt-1">
-                            🚀 Delivery in {item.deliveryTime}
-                          </p>
-                        )}
                       </div>
-                    </div>
-                  </Card>
-                ))}
+                    </Card>
+                  );
+                })}
               </div>
             )}
           </TabsContent>
@@ -159,16 +201,10 @@ export function WishlistPage() {
                           <div>
                             <h3 className="font-semibold text-white">{closet.title}</h3>
                             <p className="text-sm text-gray-400">{closet.creator}</p>
+                            <p className="text-xs text-gray-500">{closet.items} items</p>
                           </div>
-                          <Button variant="ghost" size="icon" className="text-gray-400 hover:text-primary">
-                            <Share className="w-4 h-4" />
-                          </Button>
-                        </div>
-                        
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm text-gray-400">{closet.items} items</span>
-                          <Button variant="outline" size="sm" className="border-primary text-primary">
-                            View Closet
+                          <Button variant="outline" size="sm" className="border-border">
+                            View
                           </Button>
                         </div>
                       </div>

@@ -5,6 +5,7 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Heart, X, Bookmark, Star, MapPin, Clock, Loader2 } from 'lucide-react';
 import { productAPI, type Product } from '@/lib/api';
+import { wishlistAPI } from '@/lib/wishlistAPI';
 
 export function ConnectedSwipePage() {
   const [products, setProducts] = useState<Product[]>([]);
@@ -40,16 +41,30 @@ export function ConnectedSwipePage() {
     }
   };
 
-  const handleSwipe = (direction: 'left' | 'right') => {
+  const handleSwipe = async (direction: 'left' | 'right') => {
     if (currentIndex >= products.length) return;
 
+    const currentProduct = products[currentIndex];
     setSwipeDirection(direction);
-    
+
+    // Add to wishlist if swiped right
+    if (direction === 'right' && currentProduct) {
+      try {
+        await wishlistAPI.addToWishlist(currentProduct._id);
+        console.log(`Added product ${currentProduct._id} to wishlist`);
+        // You could show a toast notification here
+      } catch (error: any) {
+        console.error('Failed to add to wishlist:', error);
+        // Handle error - maybe show a toast notification
+        // Don't prevent the swipe animation from continuing
+      }
+    }
+
     // Simulate swipe animation
     setTimeout(() => {
       setCurrentIndex(prev => prev + 1);
       setSwipeDirection(null);
-      
+
       // Load more products if we're running low
       if (currentIndex >= products.length - 2) {
         loadMoreProducts();

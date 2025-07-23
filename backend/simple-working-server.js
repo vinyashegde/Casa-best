@@ -7,6 +7,38 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
 
+// Initialize Twilio (if credentials are provided)
+let twilioClient = null;
+
+// Check for main Account SID + Auth Token (traditional method)
+if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+  try {
+    const twilio = require('twilio');
+    twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    console.log('✅ Twilio initialized with Account SID');
+  } catch (error) {
+    console.log('⚠️  Twilio initialization failed:', error.message);
+  }
+}
+// Check for API Key credentials
+else if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_API_KEY_SID && process.env.TWILIO_API_KEY_SECRET) {
+  try {
+    const twilio = require('twilio');
+    twilioClient = twilio(
+      process.env.TWILIO_API_KEY_SID,
+      process.env.TWILIO_API_KEY_SECRET,
+      { accountSid: process.env.TWILIO_ACCOUNT_SID }
+    );
+    console.log('✅ Twilio initialized with API Key');
+  } catch (error) {
+    console.log('⚠️  Twilio API Key initialization failed:', error.message);
+  }
+}
+else {
+  console.log('⚠️  Twilio credentials not found - using console logging for verification codes');
+  console.log('   To enable SMS: Add TWILIO_ACCOUNT_SID and either TWILIO_AUTH_TOKEN or API Key credentials');
+}
+
 const app = express();
 
 // CORS configuration
@@ -98,6 +130,126 @@ userSchema.methods.isVerificationCodeExpired = function() {
 
 const User = mongoose.model('User', userSchema);
 
+// Wishlist Schema
+const wishlistItemSchema = new mongoose.Schema({
+  product: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Product',
+    required: true
+  },
+  addedAt: {
+    type: Date,
+    default: Date.now
+  },
+  priority: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 5
+  },
+  notes: {
+    type: String,
+    maxlength: 500,
+    trim: true
+  },
+  priceWhenAdded: {
+    type: Number,
+    min: 0
+  }
+});
+
+const wishlistSchema = new mongoose.Schema({
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+    unique: true
+  },
+  items: [wishlistItemSchema],
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Wishlist methods
+wishlistSchema.methods.addItem = function(productId, options = {}) {
+  const existingItem = this.items.find(item =>
+    item.product.toString() === productId.toString()
+  );
+
+  if (existingItem) {
+    return this.save();
+  }
+
+  this.items.push({
+    product: productId,
+    priority: options.priority || 0,
+    notes: options.notes || '',
+    priceWhenAdded: options.priceWhenAdded
+  });
+
+  this.updatedAt = new Date();
+  return this.save();
+};
+
+wishlistSchema.methods.removeItem = function(productId) {
+  this.items = this.items.filter(item =>
+    item.product.toString() !== productId.toString()
+  );
+  this.updatedAt = new Date();
+  return this.save();
+};
+
+wishlistSchema.methods.hasProduct = function(productId) {
+  return this.items.some(item =>
+    item.product.toString() === productId.toString()
+  );
+};
+
+wishlistSchema.statics.findOrCreateForUser = async function(userId) {
+  let wishlist = await this.findOne({ user: userId });
+
+  if (!wishlist) {
+    wishlist = new this({ user: userId });
+    await wishlist.save();
+  }
+
+  return wishlist;
+};
+
+const Wishlist = mongoose.model('Wishlist', wishlistSchema);
+
+// SMS sending function
+async function sendSMS(to, message) {
+  if (!twilioClient) {
+    console.log(`📱 SMS would be sent to ${to}: ${message}`);
+    return { success: true, method: 'console' };
+  }
+
+  try {
+    if (!process.env.TWILIO_PHONE_NUMBER) {
+      throw new Error('TWILIO_PHONE_NUMBER not configured');
+    }
+
+    const result = await twilioClient.messages.create({
+      body: message,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to: to.startsWith('+') ? to : `+91${to}` // Add India country code if not present
+    });
+
+    console.log(`✅ SMS sent to ${to} - SID: ${result.sid}`);
+    return { success: true, method: 'twilio', sid: result.sid };
+  } catch (error) {
+    console.error(`❌ SMS failed to ${to}:`, error.message);
+    return { success: false, error: error.message };
+  }
+}
+
 // Simple Product Schema
 const productSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -167,16 +319,23 @@ app.post('/api/auth/send-code', async (req, res) => {
     }
     
     await user.save();
-    
-    // In development, log the code
+
+    // Send SMS with verification code
+    const smsMessage = `Your CASA verification code is: ${code}. Valid for 10 minutes.`;
+    const smsResult = await sendSMS(phone, smsMessage);
+
+    // Always log the code for development/debugging
     console.log(`📱 Verification code for ${phone}: ${code}`);
-    
+
     res.status(200).json({
       success: true,
-      message: 'Verification code sent successfully',
+      message: smsResult.method === 'twilio'
+        ? 'Verification code sent via SMS'
+        : 'Verification code sent successfully',
       data: {
         phone,
         expiresIn: 600,
+        smsMethod: smsResult.method,
         // In development, include the code for testing
         ...(process.env.NODE_ENV === 'development' && { code })
       }
@@ -639,6 +798,167 @@ app.get('/api/products/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to get product'
+    });
+  }
+});
+
+// ===== WISHLIST ROUTES =====
+
+// Get user's wishlist
+app.get('/api/wishlist', async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    const wishlist = await Wishlist.findOrCreateForUser(userId);
+    await wishlist.populate('items.product');
+
+    res.status(200).json({
+      success: true,
+      data: {
+        wishlist: {
+          items: wishlist.items,
+          totalItems: wishlist.items.length,
+          createdAt: wishlist.createdAt,
+          updatedAt: wishlist.updatedAt
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Get wishlist error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get wishlist'
+    });
+  }
+});
+
+// Add item to wishlist
+app.post('/api/wishlist', async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { productId, priority, notes } = req.body;
+
+    if (!productId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product ID is required'
+      });
+    }
+
+    // Check if product exists
+    const product = await Product.findById(productId);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    const wishlist = await Wishlist.findOrCreateForUser(userId);
+
+    // Check if already in wishlist
+    if (wishlist.hasProduct(productId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product already in wishlist'
+      });
+    }
+
+    await wishlist.addItem(productId, {
+      priority,
+      notes,
+      priceWhenAdded: product.price.current
+    });
+
+    await wishlist.populate('items.product');
+
+    res.status(200).json({
+      success: true,
+      message: 'Item added to wishlist successfully',
+      data: {
+        wishlist: {
+          items: wishlist.items,
+          totalItems: wishlist.items.length
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Add to wishlist error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to add item to wishlist'
+    });
+  }
+});
+
+// Remove item from wishlist
+app.delete('/api/wishlist/:productId', async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { productId } = req.params;
+
+    const wishlist = await Wishlist.findOne({ user: userId });
+    if (!wishlist) {
+      return res.status(404).json({
+        success: false,
+        message: 'Wishlist not found'
+      });
+    }
+
+    if (!wishlist.hasProduct(productId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Product not in wishlist'
+      });
+    }
+
+    await wishlist.removeItem(productId);
+    await wishlist.populate('items.product');
+
+    res.status(200).json({
+      success: true,
+      message: 'Item removed from wishlist successfully',
+      data: {
+        wishlist: {
+          items: wishlist.items,
+          totalItems: wishlist.items.length
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Remove from wishlist error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to remove item from wishlist'
+    });
+  }
+});
+
+// Check if product is in wishlist
+app.get('/api/wishlist/check/:productId', async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { productId } = req.params;
+
+    const wishlist = await Wishlist.findOne({ user: userId });
+    const inWishlist = wishlist ? wishlist.hasProduct(productId) : false;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        inWishlist,
+        productId
+      }
+    });
+
+  } catch (error) {
+    console.error('Check wishlist status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check wishlist status'
     });
   }
 });
